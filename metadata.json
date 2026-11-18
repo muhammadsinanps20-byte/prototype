@@ -1,0 +1,6 @@
+{
+  "name": "Newform Restaurant – Kalpetta, Wayanad",
+  "description": "Authentic Kerala favourites and Arabian specials in Kalpetta, Wayanad, with live menu, table reservations, and staff portal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
