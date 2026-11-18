@@ -1,0 +1,204 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------------
+    // 0. GLOBAL SECURITY HELPERS & RBAC DEFINITIONS
+    // -------------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Principal Staff / Admin RBAC Check
+    // Authorizes verified primary administrator email or registered admin record
+    function isAdmin() {
+      return isEmailVerified() && (
+        request.auth.token.email == 'muhammadsinanps2009@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // 1. DATA VALIDATION HELPERS
+    // -------------------------------------------------------------------------
+    function isValidReservation(data) {
+      return data.keys().hasAll(['guestName', 'guestPhone', 'date', 'time', 'guests', 'status', 'createdAt'])
+        && data.keys().hasOnly([
+          'guestName', 'guestPhone', 'guestEmail', 'date', 'time',
+          'guests', 'seatingArea', 'specialRequests', 'status', 'createdAt'
+        ])
+        && data.guestName is string
+        && data.guestName.size() >= 2
+        && data.guestName.size() <= 100
+        && data.guestPhone is string
+        && data.guestPhone.size() >= 8
+        && data.guestPhone.size() <= 20
+        && (data.guestEmail == null || (data.guestEmail is string && data.guestEmail.size() <= 120))
+        && data.date is string
+        && data.date.size() >= 8
+        && data.date.size() <= 15
+        && data.time is string
+        && data.time.size() >= 3
+        && data.time.size() <= 10
+        && data.guests is int
+        && data.guests >= 1
+        && data.guests <= 50
+        && (data.seatingArea == null || data.seatingArea in ['indoor-ac', 'family-lounge', 'open-terrace', 'arabian-majlis', 'no-preference'])
+        && (data.specialRequests == null || (data.specialRequests is string && data.specialRequests.size() <= 500))
+        && data.status in ['pending', 'confirmed', 'cancelled', 'completed']
+        && data.createdAt is string
+        && data.createdAt.size() <= 40;
+    }
+
+    function isValidInquiry(data) {
+      return data.keys().hasAll(['name', 'phoneOrEmail', 'message', 'createdAt'])
+        && data.keys().hasOnly(['name', 'phoneOrEmail', 'message', 'type', 'createdAt'])
+        && data.name is string
+        && data.name.size() >= 2
+        && data.name.size() <= 100
+        && data.phoneOrEmail is string
+        && data.phoneOrEmail.size() >= 5
+        && data.phoneOrEmail.size() <= 120
+        && data.message is string
+        && data.message.size() >= 2
+        && data.message.size() <= 2000
+        && (data.type == null || data.type in ['general', 'catering', 'event', 'feedback'])
+        && data.createdAt is string
+        && data.createdAt.size() <= 40;
+    }
+
+    function isValidDish(data) {
+      return data.keys().hasAll(['name', 'category', 'description'])
+        && data.keys().hasOnly([
+          'name', 'malayalamName', 'category', 'description', 'price',
+          'image', 'dietaryTags', 'isSignature', 'available', 'createdAt'
+        ])
+        && data.name is string
+        && data.name.size() >= 2
+        && data.name.size() <= 120
+        && (data.malayalamName == null || (data.malayalamName is string && data.malayalamName.size() <= 120))
+        && data.category in ['kerala', 'arabian', 'chinese', 'dessert']
+        && data.description is string
+        && data.description.size() <= 2000
+        && (data.price == null || (data.price is string && data.price.size() <= 60))
+        && (data.image == null || (data.image is string && data.image.size() <= 1048576))
+        && (data.dietaryTags == null || (data.dietaryTags is string && data.dietaryTags.size() <= 200) || (data.dietaryTags is list && data.dietaryTags.size() <= 6))
+        && (data.isSignature == null || data.isSignature is bool)
+        && (data.available == null || data.available is bool)
+        && (data.createdAt == null || (data.createdAt is string && data.createdAt.size() <= 40));
+    }
+
+    function isValidGalleryPhoto(data) {
+      return data.keys().hasAll(['title', 'image', 'visible', 'createdAt'])
+        && data.keys().hasOnly(['title', 'caption', 'category', 'image', 'visible', 'createdAt'])
+        && data.title is string
+        && data.title.size() >= 2
+        && data.title.size() <= 120
+        && (data.caption == null || (data.caption is string && data.caption.size() <= 300))
+        && (data.category == null || (data.category is string && data.category.size() <= 60))
+        && data.image is string
+        && data.image.size() > 0
+        && data.image.size() <= 1048576
+        && data.visible is bool
+        && data.createdAt is string
+        && data.createdAt.size() <= 40;
+    }
+
+    function isValidSiteSettings(data) {
+      return data.keys().hasOnly([
+          'openingHours', 'phone', 'whatsappNumber', 'email', 'address', 'noticeBanner', 'updatedAt'
+        ])
+        && (data.openingHours == null || (data.openingHours is string && data.openingHours.size() <= 120))
+        && (data.phone == null || (data.phone is string && data.phone.size() <= 50))
+        && (data.whatsappNumber == null || (data.whatsappNumber is string && data.whatsappNumber.size() <= 50))
+        && (data.email == null || (data.email is string && data.email.size() <= 100))
+        && (data.address == null || (data.address is string && data.address.size() <= 300))
+        && (data.noticeBanner == null || (data.noticeBanner is string && data.noticeBanner.size() <= 500))
+        && (data.updatedAt == null || (data.updatedAt is string && data.updatedAt.size() <= 40));
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. RESOURCE ACCESS RULES
+    // -------------------------------------------------------------------------
+
+    // Global Safety Net (Catch-all Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. GUEST RESERVATIONS (PII Protected)
+    match /reservations/{reservationId} {
+      allow create: if isValidId(reservationId)
+                    && isValidReservation(incoming())
+                    && incoming().status == 'pending';
+      allow get, delete: if isValidId(reservationId) && isAdmin();
+      allow list: if isAdmin();
+      allow update: if isValidId(reservationId)
+                    && isAdmin()
+                    && isValidReservation(incoming())
+                    && incoming().createdAt == existing().createdAt;
+    }
+
+    // 2. GUEST INQUIRIES & CATERING MESSAGES (PII Protected)
+    match /inquiries/{inquiryId} {
+      allow create: if isValidId(inquiryId) && isValidInquiry(incoming());
+      allow get, delete: if isValidId(inquiryId) && isAdmin();
+      allow list: if isAdmin();
+      allow update: if isValidId(inquiryId)
+                    && isAdmin()
+                    && isValidInquiry(incoming())
+                    && incoming().createdAt == existing().createdAt;
+    }
+
+    // 3. MENU DISHES & PRICES (Public Read, Admin Write)
+    match /dishes/{dishId} {
+      allow read: if true;
+      allow create: if isValidId(dishId) && isAdmin() && isValidDish(incoming());
+      allow update: if isValidId(dishId) && isAdmin() && isValidDish(incoming());
+      allow delete: if isValidId(dishId) && isAdmin();
+    }
+
+    // 4. EDITORIAL GALLERY PHOTOS (Public Read, Admin Write)
+    match /gallery/{photoId} {
+      allow read: if true;
+      allow create: if isValidId(photoId) && isAdmin() && isValidGalleryPhoto(incoming());
+      allow update: if isValidId(photoId) && isAdmin() && isValidGalleryPhoto(incoming());
+      allow delete: if isValidId(photoId) && isAdmin();
+    }
+
+    // 5. SITE SETTINGS & OPERATIONAL DATA (Public Read, Admin Write)
+    match /settings/{settingId} {
+      allow read: if true;
+      allow create, update: if isValidId(settingId) && isAdmin() && isValidSiteSettings(incoming());
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+
+    // 6. ADMIN REGISTRY (Locked down against client privilege escalation)
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId;
+      allow write: if false;
+    }
+
+    // 7. HEALTH PROBE & CONNECTION TEST
+    match /_connection_test_/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}

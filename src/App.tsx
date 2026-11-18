@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import AdminPortal from './components/admin/AdminPortal';
+import { CustomCursor } from './components/CustomCursor';
 import { GallerySection } from './components/GallerySection';
 import { ReviewsSection } from './components/ReviewsSection';
 import { SignatureSpotlight } from './components/SignatureSpotlight';
@@ -126,6 +127,43 @@ function RestaurantApp() {
     loadFromStorage<SiteSettingsData>(STORAGE_KEYS.settings, DEFAULT_SITE_SETTINGS)
   );
 
+  // Hydrate public data from Express backend when available
+  useEffect(() => {
+    let cancelled = false;
+    const loadPublicSite = async () => {
+      try {
+        const res = await fetch('/api/public/site');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (Array.isArray(data.dishes) && data.dishes.length > 0) {
+          setDishes((prev) => {
+            const hiddenMap = new Map(prev.filter((d) => !d.available).map((d) => [d.id, d]));
+            const merged = (data.dishes as DishItem[]).map((item) => item);
+            hiddenMap.forEach((hiddenDish) => {
+              if (!merged.some((d) => d.id === hiddenDish.id)) {
+                merged.push(hiddenDish);
+              }
+            });
+            return merged;
+          });
+        }
+        if (Array.isArray(data.gallery) && data.gallery.length > 0) {
+          setGalleryPhotos(data.gallery);
+        }
+        if (data.settings) {
+          setSiteSettings((prev) => ({ ...prev, ...data.settings }));
+        }
+      } catch {
+        // Fallback to localStorage / siteData defaults seamlessly
+      }
+    };
+    void loadPublicSite();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Sync changes to localStorage
   useEffect(() => {
     saveToStorage(STORAGE_KEYS.dishes, dishes);
@@ -218,7 +256,7 @@ function RestaurantApp() {
     });
   }, [dishes, selectedCategory, selectedDietary, menuSearch]);
 
-  const handleReservationSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleReservationSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setResError(null);
     setResConfirmed(null);
@@ -232,8 +270,7 @@ function RestaurantApp() {
       return;
     }
 
-    const newBooking: ReservationItem = {
-      id: `res-${Date.now()}`,
+    const payload = {
       guestName: resName.trim(),
       guestPhone: resPhone.trim(),
       date: resDate,
@@ -241,38 +278,105 @@ function RestaurantApp() {
       guests: Number(resGuests) || 2,
       seatingArea: resSeating,
       specialRequests: resNotes.trim() || undefined,
+    };
+
+    let createdBooking: ReservationItem = {
+      id: `res-${Date.now()}`,
+      ...payload,
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
 
-    setReservations((prev) => [newBooking, ...prev]);
+    try {
+      const response = await fetch('/api/reservations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (response.ok) {
+        createdBooking = (await response.json()) as ReservationItem;
+      }
+    } catch {
+      // Local persistence fallback
+    }
+
+    setReservations((prev) => [createdBooking, ...prev]);
     setResConfirmed(
-      `Reservation request received for ${newBooking.guestName} (${newBooking.guests} guests on ${newBooking.date} at ${newBooking.time}).`
+      `Reservation request received for ${createdBooking.guestName} (${createdBooking.guests} guests on ${createdBooking.date} at ${createdBooking.time}).`
     );
     setResName('');
     setResPhone('');
     setResNotes('');
   };
 
-  const handleInquirySubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleInquirySubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!inqName.trim() || !inqContact.trim() || !inqMessage.trim()) return;
 
-    const newInquiry: InquiryItem = {
-      id: `inq-${Date.now()}`,
+    const payload = {
       name: inqName.trim(),
       phoneOrEmail: inqContact.trim(),
       type: inqType,
       message: inqMessage.trim(),
+    };
+
+    let createdInquiry: InquiryItem = {
+      id: `inq-${Date.now()}`,
+      ...payload,
       createdAt: new Date().toISOString(),
     };
 
-    setInquiries((prev) => [newInquiry, ...prev]);
+    try {
+      const response = await fetch('/api/inquiries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (response.ok) {
+        createdInquiry = (await response.json()) as InquiryItem;
+      }
+    } catch {
+      // Local persistence fallback
+    }
+
+    setInquiries((prev) => [createdInquiry, ...prev]);
     setInqName('');
     setInqContact('');
     setInqMessage('');
     setInqConfirmed(true);
     setTimeout(() => setInqConfirmed(false), 4000);
+  };
+
+  const handleAddPublicPhoto = async (payload: {
+    title: string;
+    caption: string;
+    category: string;
+    image: string;
+  }) => {
+    let createdPhoto: GalleryPhotoItem = {
+      id: `gal-${Date.now()}`,
+      title: payload.title,
+      caption: payload.caption,
+      category: payload.category,
+      image: payload.image,
+      visible: true,
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      const response = await fetch('/api/gallery/public', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (response.ok) {
+        createdPhoto = (await response.json()) as GalleryPhotoItem;
+      }
+    } catch {
+      // Local persistence fallback
+    }
+
+    setGalleryPhotos((prev) => [createdPhoto, ...prev]);
   };
 
   const scrollToMenu = (category?: DishCategory) => {
@@ -297,23 +401,29 @@ function RestaurantApp() {
 
   if (isAdminRoute) {
     return (
-      <AdminPortal
-        onBack={closeAdminPortal}
-        dishes={dishes}
-        onUpdateDishes={setDishes}
-        galleryPhotos={galleryPhotos}
-        onUpdateGalleryPhotos={setGalleryPhotos}
-        reservations={reservations}
-        onUpdateReservations={setReservations}
-        inquiries={inquiries}
-        siteSettings={siteSettings}
-        onUpdateSiteSettings={setSiteSettings}
-      />
+      <>
+        <CustomCursor />
+        <AdminPortal
+          onBack={closeAdminPortal}
+          dishes={dishes}
+          onUpdateDishes={setDishes}
+          galleryPhotos={galleryPhotos}
+          onUpdateGalleryPhotos={setGalleryPhotos}
+          reservations={reservations}
+          onUpdateReservations={setReservations}
+          inquiries={inquiries}
+          onUpdateInquiries={setInquiries}
+          siteSettings={siteSettings}
+          onUpdateSiteSettings={setSiteSettings}
+        />
+      </>
     );
   }
 
   return (
     <div className="min-h-screen bg-[#14110F] text-[#F6EFE3] pb-16 sm:pb-0">
+      <CustomCursor />
+
       {/* Optional Live Notice Banner */}
       {siteSettings.noticeBanner.trim() && (
         <div className="bg-[#D9A441] px-4 py-2 text-center text-xs font-semibold text-[#14110F]">
@@ -746,11 +856,12 @@ function RestaurantApp() {
         </div>
       </section>
 
-      {/* 5. Editorial Photography Gallery */}
+      {/* 5. Editorial Photography Gallery + Public Image Sharing */}
       <GallerySection
         photos={galleryPhotos}
         failedImages={failedImages}
         onImageError={handleImageError}
+        onAddPublicPhoto={handleAddPublicPhoto}
       />
 
       {/* 6. Verified Guest Reviews */}

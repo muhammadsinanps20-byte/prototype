@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -52,6 +52,7 @@ export interface AdminPortalProps {
   reservations?: ReservationItem[];
   onUpdateReservations?: React.Dispatch<React.SetStateAction<ReservationItem[]>>;
   inquiries?: InquiryItem[];
+  onUpdateInquiries?: React.Dispatch<React.SetStateAction<InquiryItem[]>>;
   siteSettings?: SiteSettingsData;
   onUpdateSiteSettings?: (settings: SiteSettingsData) => void;
 }
@@ -60,7 +61,8 @@ type AdminTab = 'menu' | 'gallery' | 'bookings' | 'inquiries' | 'settings';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ADMIN_PASSCODE = '2244';
-const SESSION_KEY = 'newform_admin_email_session';
+const SESSION_EMAIL_KEY = 'newform_admin_email_session';
+const SESSION_TOKEN_KEY = 'newform_admin_token_session';
 
 const ALL_DIETARY_TAGS: DietaryTag[] = ['Vegetarian', 'Vegan', 'Gluten-Free', 'Spicy'];
 
@@ -89,6 +91,15 @@ const EMPTY_DISH_FORM: DishFormState = {
   available: true,
 };
 
+function readSessionValue(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 export function AdminPortal({
   onAuthenticated,
   onBack,
@@ -99,6 +110,7 @@ export function AdminPortal({
   reservations: propReservations,
   onUpdateReservations,
   inquiries: propInquiries,
+  onUpdateInquiries,
   siteSettings: propSiteSettings,
   onUpdateSiteSettings,
 }: AdminPortalProps) {
@@ -106,14 +118,14 @@ export function AdminPortal({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authenticatedEmail, setAuthenticatedEmail] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null;
-    try {
-      return window.sessionStorage.getItem(SESSION_KEY);
-    } catch {
-      return null;
-    }
-  });
+  const [signingIn, setSigningIn] = useState(false);
+
+  const [authenticatedEmail, setAuthenticatedEmail] = useState<string | null>(() =>
+    readSessionValue(SESSION_EMAIL_KEY)
+  );
+  const [adminToken, setAdminToken] = useState<string | null>(() =>
+    readSessionValue(SESSION_TOKEN_KEY)
+  );
 
   const [activeTab, setActiveTab] = useState<AdminTab>('menu');
   const [searchQuery, setSearchQuery] = useState('');
@@ -123,7 +135,9 @@ export function AdminPortal({
   // Standalone fallback states when AdminPortal is mounted without props
   const [localDishes, setLocalDishes] = useState<DishItem[]>(INITIAL_DISHES);
   const [localGallery, setLocalGallery] = useState<GalleryPhotoItem[]>(INITIAL_GALLERY);
-  const [localReservations, setLocalReservations] = useState<ReservationItem[]>(INITIAL_RESERVATIONS);
+  const [localReservations, setLocalReservations] =
+    useState<ReservationItem[]>(INITIAL_RESERVATIONS);
+  const [localInquiries, setLocalInquiries] = useState<InquiryItem[]>(INITIAL_INQUIRIES);
   const [localSettings, setLocalSettings] = useState<SiteSettingsData>(DEFAULT_SITE_SETTINGS);
 
   const dishes = propDishes ?? localDishes;
@@ -132,7 +146,8 @@ export function AdminPortal({
   const setGalleryPhotos = onUpdateGalleryPhotos ?? setLocalGallery;
   const reservations = propReservations ?? localReservations;
   const setReservations = onUpdateReservations ?? setLocalReservations;
-  const inquiries = propInquiries ?? INITIAL_INQUIRIES;
+  const inquiries = propInquiries ?? localInquiries;
+  const setInquiries = onUpdateInquiries ?? setLocalInquiries;
   const currentSettings = propSiteSettings ?? localSettings;
 
   // Dish Create / Edit Modal state
@@ -142,7 +157,7 @@ export function AdminPortal({
   const [dishUploadError, setDishUploadError] = useState<string | null>(null);
   const dishFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Gallery upload modal/form state
+  // Gallery upload form state
   const [galTitle, setGalTitle] = useState('');
   const [galCaption, setGalCaption] = useState('');
   const [galCategory, setGalCategory] = useState('Kerala Kitchen');
@@ -155,7 +170,57 @@ export function AdminPortal({
   const [settingsDraft, setSettingsDraft] = useState<SiteSettingsData>(currentSettings);
   const [settingsSaved, setSettingsSaved] = useState(false);
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const adminFetch = async (url: string, options: RequestInit = {}) => {
+    if (!adminToken) return null;
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+          ...(options.headers ?? {}),
+        },
+      });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch {
+      return null;
+    }
+  };
+
+  // Fetch protected admin collections (bookings, inquiries, hidden items) once authenticated
+  useEffect(() => {
+    if (!authenticatedEmail || !adminToken) return;
+    let cancelled = false;
+
+    const loadAdminData = async () => {
+      try {
+        const res = await fetch('/api/admin/bootstrap', {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (Array.isArray(data.dishes)) setDishes(data.dishes);
+        if (Array.isArray(data.gallery)) setGalleryPhotos(data.gallery);
+        if (Array.isArray(data.reservations)) setReservations(data.reservations);
+        if (Array.isArray(data.inquiries)) setInquiries(data.inquiries);
+        if (data.settings) {
+          onUpdateSiteSettings?.(data.settings);
+          setSettingsDraft(data.settings);
+        }
+      } catch {
+        // Offline / static fallback preserves existing state
+      }
+    };
+
+    void loadAdminData();
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedEmail, adminToken]);
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
 
@@ -170,11 +235,39 @@ export function AdminPortal({
       return;
     }
 
+    setSigningIn(true);
+    let issuedToken = `local-${Date.now()}`;
+
     try {
-      window.sessionStorage.setItem(SESSION_KEY, trimmedEmail);
+      const response = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: trimmedEmail, password }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.token) issuedToken = data.token;
+      } else if (response.status === 400 || response.status === 401) {
+        const errData = await response.json().catch(() => ({}));
+        setError(errData.error || 'Authentication failed.');
+        setSigningIn(false);
+        return;
+      }
+    } catch {
+      // Allow seamless client fallback if backend server is offline in static preview
+    } finally {
+      setSigningIn(false);
+    }
+
+    try {
+      window.sessionStorage.setItem(SESSION_EMAIL_KEY, trimmedEmail);
+      window.sessionStorage.setItem(SESSION_TOKEN_KEY, issuedToken);
     } catch {
       // Ignore restricted sessionStorage
     }
+
+    setAdminToken(issuedToken);
     setAuthenticatedEmail(trimmedEmail);
     setSettingsDraft(currentSettings);
     onAuthenticated?.(trimmedEmail);
@@ -182,10 +275,12 @@ export function AdminPortal({
 
   const handleSignOut = () => {
     try {
-      window.sessionStorage.removeItem(SESSION_KEY);
+      window.sessionStorage.removeItem(SESSION_EMAIL_KEY);
+      window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
     } catch {
       // Ignore restricted sessionStorage
     }
+    setAdminToken(null);
     setAuthenticatedEmail(null);
     setPassword('');
     setError(null);
@@ -241,29 +336,28 @@ export function AdminPortal({
     }));
   };
 
-  const handleSaveDishModal = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveDishModal = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!dishForm.name.trim() || !dishForm.description.trim()) return;
 
     if (dishForm.id) {
-      setDishes((prev) =>
-        prev.map((d) =>
-          d.id === dishForm.id
-            ? {
-                ...d,
-                name: dishForm.name.trim(),
-                malayalamName: dishForm.malayalamName.trim() || undefined,
-                category: dishForm.category,
-                price: dishForm.price.trim() || '₹180',
-                description: dishForm.description.trim(),
-                image: dishForm.image.trim() || HERO_IMAGE,
-                dietaryTags: dishForm.dietaryTags,
-                isSignature: dishForm.isSignature,
-                available: dishForm.available,
-              }
-            : d
-        )
-      );
+      const payload: DishItem = {
+        id: dishForm.id,
+        name: dishForm.name.trim(),
+        malayalamName: dishForm.malayalamName.trim() || undefined,
+        category: dishForm.category,
+        price: dishForm.price.trim() || '₹180',
+        description: dishForm.description.trim(),
+        image: dishForm.image.trim() || HERO_IMAGE,
+        dietaryTags: dishForm.dietaryTags,
+        isSignature: dishForm.isSignature,
+        available: dishForm.available,
+      };
+      setDishes((prev) => prev.map((d) => (d.id === dishForm.id ? payload : d)));
+      void adminFetch(`/api/admin/dishes/${dishForm.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
     } else {
       const newDish: DishItem = {
         id: `dish-${Date.now()}`,
@@ -278,6 +372,10 @@ export function AdminPortal({
         available: dishForm.available,
       };
       setDishes((prev) => [newDish, ...prev]);
+      void adminFetch('/api/admin/dishes', {
+        method: 'POST',
+        body: JSON.stringify(newDish),
+      });
     }
 
     setDishModalOpen(false);
@@ -285,20 +383,28 @@ export function AdminPortal({
 
   const handleDeleteDish = (id: string) => {
     setDishes((prev) => prev.filter((d) => d.id !== id));
+    void adminFetch(`/api/admin/dishes/${id}`, { method: 'DELETE' });
     setDishModalOpen(false);
   };
 
   const handleToggleAvailability = (id: string) => {
+    const target = dishes.find((d) => d.id === id);
+    const nextAvailable = target ? !target.available : true;
     setDishes((prev) =>
       prev.map((dish) =>
-        dish.id === id ? { ...dish, available: !dish.available } : dish
+        dish.id === id ? { ...dish, available: nextAvailable } : dish
       )
     );
+    void adminFetch(`/api/admin/dishes/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ available: nextAvailable }),
+    });
   };
 
   const handleImportDefaultMenu = () => {
     setDishes(INITIAL_DISHES);
     setConfirmRestoreMenu(false);
+    void adminFetch('/api/admin/dishes/reset', { method: 'POST' });
   };
 
   const handleGalleryFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -320,7 +426,9 @@ export function AdminPortal({
   const handleAddGalleryPhoto = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!galTitle.trim() || !galImage.trim()) {
-      setGalUploadError('Please provide a photo title and upload an image (or enter an image URL).');
+      setGalUploadError(
+        'Please provide a photo title and upload an image (or enter an image URL).'
+      );
       return;
     }
 
@@ -335,6 +443,11 @@ export function AdminPortal({
     };
 
     setGalleryPhotos((prev) => [newPhoto, ...prev]);
+    void adminFetch('/api/admin/gallery', {
+      method: 'POST',
+      body: JSON.stringify(newPhoto),
+    });
+
     setGalTitle('');
     setGalCaption('');
     setGalImage('');
@@ -346,21 +459,30 @@ export function AdminPortal({
   };
 
   const handleToggleGalleryVisibility = (id: string) => {
+    const target = galleryPhotos.find((p) => p.id === id);
+    const nextVisible = target ? !target.visible : true;
     setGalleryPhotos((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, visible: !p.visible } : p))
+      prev.map((p) => (p.id === id ? { ...p, visible: nextVisible } : p))
     );
+    void adminFetch(`/api/admin/gallery/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ visible: nextVisible }),
+    });
   };
 
   const handleDeleteGalleryPhoto = (id: string) => {
     setGalleryPhotos((prev) => prev.filter((p) => p.id !== id));
+    void adminFetch(`/api/admin/gallery/${id}`, { method: 'DELETE' });
   };
 
   const handleConfirmReservation = (id: string) => {
     setReservations((prev) =>
-      prev.map((res) =>
-        res.id === id ? { ...res, status: 'confirmed' } : res
-      )
+      prev.map((res) => (res.id === id ? { ...res, status: 'confirmed' } : res))
     );
+    void adminFetch(`/api/admin/reservations/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'confirmed' }),
+    });
   };
 
   const handleSaveSettings = (event: React.FormEvent<HTMLFormElement>) => {
@@ -370,6 +492,10 @@ export function AdminPortal({
     } else {
       setLocalSettings(settingsDraft);
     }
+    void adminFetch('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settingsDraft),
+    });
     setSettingsSaved(true);
     setTimeout(() => setSettingsSaved(false), 2500);
   };
@@ -465,9 +591,10 @@ export function AdminPortal({
 
             <button
               type="submit"
-              className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#D9A441] px-4 py-2.5 text-sm font-semibold text-[#14110F] transition-colors hover:bg-[#e5b556] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D9A441] whitespace-nowrap"
+              disabled={signingIn}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#D9A441] px-4 py-2.5 text-sm font-semibold text-[#14110F] transition-colors hover:bg-[#e5b556] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D9A441] whitespace-nowrap disabled:opacity-60"
             >
-              Sign In to Admin Portal
+              {signingIn ? 'Verifying...' : 'Sign In to Admin Portal'}
               <ArrowRight className="h-4 w-4" />
             </button>
           </form>
@@ -783,6 +910,7 @@ export function AdminPortal({
                   <option value="Arabian Kitchen">Arabian Kitchen</option>
                   <option value="Dining Spread">Dining Spread</option>
                   <option value="Desserts">Desserts</option>
+                  <option value="Guest Moment">Guest Moment</option>
                 </select>
               </div>
 
